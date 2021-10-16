@@ -2,33 +2,29 @@ extern crate chrono;
 extern crate clap;
 extern crate prettytable;
 extern crate yahoo_finance_api;
+extern crate serde;
+extern crate toml;
 
+use std::io::{Read, Write};
+use std::ops::Sub;
+use chrono::{Duration, TimeZone, Utc};
 use clap::{App, Arg};
 use futures::executor::block_on;
+use prettytable::{Cell, Row};
 use yahoo_finance_api::YahooConnector;
+use serde::{Deserialize};
 
 fn main() {
     let matches = App::new("Stock Spreadsheet Generator")
         .version("0.1.0")
-        .author("marcus8448")
-        .about("Creates a simple spreadsheet based on yahoo finance data")
-
-        .arg(Arg::with_name("file")
-            .short("f")
-            .long("file")
-            .takes_value(true)
-            .help("the csv file to output data to")
-            .default_value("output.csv")
-        )
-        .arg(Arg::with_name("disable-file")
-            .short("d")
-            .long("disable-file")
-            .help("disables csv file output")
-        )
-        .arg(Arg::with_name("disable-console-output")
+        .author("marcus8448")//toml conf
+        .about("Creates a simple spreadsheet based on yahoo finance data")//change from prev day
+        .arg(Arg::with_name("config")
             .short("c")
-            .long("disable-console-output")
-            .help("disables console table output")
+            .long("config")
+            .takes_value(true)
+            .help("the config file to read")
+            .default_value("config.toml")
         )
         .arg(Arg::with_name("run-once")
             .short("o")
@@ -42,59 +38,62 @@ fn main() {
             .default_value("60")
             .help("how long to wait before doing another query")
         )
-        .arg(Arg::with_name("tickers")
-            .default_value("GOOG")
-            .multiple(true)
-            .min_values(1)
-            .require_delimiter(false)
-            .takes_value(true)
-        )
         .get_matches();
 
     let provider = YahooConnector::new();
-    let file = matches.value_of("file").unwrap();
+    let file = matches.value_of("config").unwrap();
     let wait_time_u64 = matches.value_of("wait-time").unwrap().parse::<u64>().unwrap();
     let wait_time = std::time::Duration::from_secs(wait_time_u64);
     let one_sec = std::time::Duration::from_secs(1);
-    let disable_file = matches.is_present("disable-file");
-    let console_output = !matches.is_present("disable-console-output");
+
+    let path = std::path::Path::new(file);
+    if !path.exists() {
+        println!("No config file found... creating one.");
+        let result = std::fs::File::create(file);
+        let mut conf = match result {
+            Ok(conf) => conf,
+            Err(error) => panic!("Failed to create default config! {:}", error),
+        };
+        conf.write_all(
+r#"[[tickers]]
+id = "GOOG"
+volume = 2
+
+[[tickers]]
+id = "MSFT"
+volume = 5
+"#
+    .as_ref()).expect("Failed to write default config!");
+    }
+    let mut conf = String::new();
+    let result = std::fs::File::open(file);
+    let mut file = match result {
+        Ok(file) => file,
+        Err(error) => panic!("Failed to open config! {:}", error),
+    };
+    match file.read_to_string(&mut conf) {
+        Ok(_) => {},
+        Err(error) => panic!("Failed to read config! {:}", error),
+    };
+
+    let result: Result<Config, toml::de::Error> = toml::from_str(conf.as_str());
+    let config = match result {
+        Ok(cfg) => cfg,
+        Err(error) => panic!("Failed to parse config! {:}", error),
+    };
 
     loop {
         println!("Query time: {}", chrono::prelude::Local::now());
-        let tickers_str = matches.values_of("tickers").unwrap();
-        let mut output: String = String::new();
-        output.push_str("Ticker,Value,Volume,Total\n");
 
-        for t in tickers_str {
-            println!("{}", t);
-            let out = deserialize_yahoo(&provider, t);
-            output.push_str(out.as_str());
-            output.push('\n');
+        let mut table = prettytable::Table::new();
+        table.add_row(Row::new(vec!(Cell::new("Ticker"), Cell::new("Value"), Cell::new("Change"), Cell::new("Volume"), Cell::new("Total"))));
+
+        for t in &config.tickers {
+             table.add_row(deserialize_yahoo(&provider, t));
         }
 
-        if !disable_file {
-            let result = std::fs::write(file, output.as_str());
-            if result.is_err() {
-                println!("Warning: unable to write csv - {:?}", result.err().unwrap());
-            }
-        }
+        table.printstd();
 
-        if console_output {
-            let mut table = prettytable::Table::new();
-            let mut reader = prettytable::csv::ReaderBuilder::new().has_headers(false).flexible(true).from_reader(output.as_str().as_bytes());
-            for record in reader.records() {
-                let mut row = prettytable::Row::empty();
-                for v in record.unwrap().iter() {
-                    row.add_cell(prettytable::Cell::new(v));
-                }
-                table.add_row(row);
-            }
-            table.printstd();
-        }
-
-        if matches.is_present("run_once") {
-            break;
-        }
         let completion = std::time::Instant::now();
         let bar = indicatif::ProgressBar::new(wait_time_u64);
         while std::time::Instant::now().duration_since(completion) < wait_time {
@@ -102,11 +101,16 @@ fn main() {
             bar.inc(1);
         }
         bar.finish_and_clear();
+
+
+        if matches.is_present("run-once") {
+            break;
+        }
     }
 }
 
-fn deserialize_yahoo(provider: &YahooConnector, t: &str) -> String {
-    let future = provider.get_latest_quotes(t, "1m");
+fn deserialize_yahoo(provider: &YahooConnector, t: &Ticker) -> Row {
+    let future = provider.get_latest_quotes(t.id.as_str(), "1m");
     let result = block_on(future);
     let data = match result {
         Ok(data) => data,
@@ -117,5 +121,27 @@ fn deserialize_yahoo(provider: &YahooConnector, t: &str) -> String {
         Err(error) => panic!("Warning: Problem deserializing last quote: {:?}", error)
     };
 
-    format!("{},{:.2},{},{:.2}", t, quote.close, quote.volume, quote.close * (quote.volume as f64))
+    let future = provider.get_quote_history_interval(t.id.as_str(), Utc.from_utc_datetime(&chrono::Local::now().naive_utc().sub(Duration::days(2))), Utc.from_utc_datetime(&chrono::Local::now().naive_utc()), "1d");
+    let result = block_on(future);
+    let data = match result {
+        Ok(data) => data,
+        Err(error) => panic!("Warning: Problem communicating with Yahoo! API: {:?}", error)
+    };
+    let quotes = match data.quotes() {
+        Ok(quotes) => quotes,
+        Err(error) => panic!("Warning: Problem deserializing previous quotes: {:?}", error)
+    };
+
+    return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new(format!("{:.2}", quote.close).as_str()), Cell::new(format!("{:.2}", quote.close - quotes.get(0).unwrap().close).as_str()), Cell::new(t.volume.unwrap_or(0).to_string().as_str()), Cell::new(&*format!("{:.2}", ((t.volume.unwrap_or(0) as f64) * quote.close)))));
+}
+
+#[derive(Deserialize)]
+struct Config {
+    tickers: Vec<Ticker>,
+}
+
+#[derive(Deserialize)]
+struct Ticker {
+    id: String,
+    volume: Option<u32>,
 }
