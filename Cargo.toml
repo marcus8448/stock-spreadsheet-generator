@@ -1,0 +1,17 @@
+[package]
+name = "stock_spreadsheet_generator"
+description = "Creates a simple spreadsheet based on yahoo finance data"
+version = "0.1.0"
+authors = ["marcus8448"]
+edition = "2018"
+readme = "README.md"
+repository = "https://github.com/marcus8448/stock_spreadsheet_generator/"
+license = "MIT"
+
+[dependencies]
+yahoo_finance_api = "1.2.2"
+clap = "2.33.3"
+futures = "0.3.17"
+chrono = "0.4.19"
+indicatif = "0.16.2"
+prettytable-rs = "0.8.0"
