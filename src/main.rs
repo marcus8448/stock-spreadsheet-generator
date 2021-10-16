@@ -16,7 +16,7 @@ use serde::{Deserialize};
 
 fn main() {
     let matches = App::new("Stock Spreadsheet Generator")
-        .version("0.1.0")
+        .version("0.2.0")
         .author("marcus8448")//toml conf
         .about("Creates a simple spreadsheet based on yahoo finance data")//change from prev day
         .arg(Arg::with_name("config")
