@@ -1,9 +1,9 @@
 [package]
 name = "stock_spreadsheet_generator"
 description = "Creates a simple spreadsheet based on yahoo finance data"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["marcus8448"]
-edition = "2018"
+edition = "2021"
 readme = "README.md"
 repository = "https://github.com/marcus8448/stock_spreadsheet_generator/"
 license = "MIT"
