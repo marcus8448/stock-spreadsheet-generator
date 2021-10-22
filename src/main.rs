@@ -7,7 +7,7 @@ extern crate toml;
 
 use std::io::{Read, Write};
 use std::ops::Sub;
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{Duration, Timelike, TimeZone, Utc};
 use clap::{App, Arg};
 use futures::executor::block_on;
 use prettytable::{Cell, Row};
@@ -93,6 +93,15 @@ volume = 5
         }
 
         table.printstd();
+        match std::fs::File::create("output.csv") {
+            Ok(writer) => {
+                match table.to_csv(writer) {
+                    Ok(_) => {}
+                    Err(error) => print!("Warning: Problem writing csv: {:?}", error)
+                }
+            }
+            Err(error) => print!("Warning: Problem writing csv: {:?}", error)
+        };
 
         let completion = std::time::Instant::now();
         let bar = indicatif::ProgressBar::new(wait_time_u64);
@@ -114,22 +123,23 @@ fn deserialize_yahoo(provider: &YahooConnector, t: &Ticker) -> Row {
     let result = block_on(future);
     let data = match result {
         Ok(data) => data,
-        Err(error) => panic!("Warning: Problem communicating with Yahoo! API: {:?}", error)
+        Err(error) => panic!("Problem communicating with Yahoo! API: {:?}", error)
     };
     let quote = match data.last_quote() {
         Ok(quote) => quote,
-        Err(error) => panic!("Warning: Problem deserializing last quote: {:?}", error)
+        Err(error) => panic!("Problem deserializing last quote: {:?}", error)
     };
 
-    let future = provider.get_quote_history_interval(t.id.as_str(), Utc.from_utc_datetime(&chrono::Local::now().naive_utc().sub(Duration::days(2))), Utc.from_utc_datetime(&chrono::Local::now().naive_utc()), "1d");
+    let yesterday_close_time = Utc.from_utc_datetime(&chrono::Utc::now().naive_utc().sub(Duration::days(1)).with_hour(12 + 10).unwrap().with_minute(1).unwrap().with_second(1).unwrap());
+    let future = provider.get_quote_history(t.id.as_str(), yesterday_close_time, yesterday_close_time/* + Duration::minutes(30)*/);
     let result = block_on(future);
     let data = match result {
         Ok(data) => data,
-        Err(error) => panic!("Warning: Problem communicating with Yahoo! API: {:?}", error)
+        Err(error) => panic!("Problem communicating with Yahoo! API: {:?}", error)
     };
     let quotes = match data.quotes() {
         Ok(quotes) => quotes,
-        Err(error) => panic!("Warning: Problem deserializing previous quotes: {:?}", error)
+        Err(error) => panic!("Problem deserializing previous quotes: {:?}", error)
     };
 
     return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new(format!("{:.2}", quote.close).as_str()), Cell::new(format!("{:.2}", quote.close - quotes.get(0).unwrap().close).as_str()), Cell::new(t.volume.unwrap_or(0).to_string().as_str()), Cell::new(&*format!("{:.2}", ((t.volume.unwrap_or(0) as f64) * quote.close)))));
