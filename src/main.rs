@@ -119,7 +119,7 @@ fn deserialize_yahoo(provider: &YahooConnector, t: &Ticker) -> Row {
                 Ok(data) => data,
                 Err(error1) => {
                     std::thread::sleep(ONE_SEC);
-                    let res: YResponse = match block_on(provider.get_latest_quotes(t.id.as_str(), "30m")) {
+                    let res: YResponse = match block_on(provider.get_latest_quotes(t.id.as_str(), "10m")) {
                         Ok(data) => data,
                         Err(error2) => {
                             println!("Warning: Failed to obtain quotes: {:?}", error0);
