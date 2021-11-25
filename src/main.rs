@@ -11,12 +11,14 @@ use chrono::{Duration, Timelike, TimeZone, Utc};
 use clap::{App, Arg};
 use futures::executor::block_on;
 use prettytable::{Cell, Row};
-use yahoo_finance_api::YahooConnector;
+use yahoo_finance_api::{Quote, YahooConnector, YahooError, YResponse};
 use serde::{Deserialize};
+
+static ONE_SEC: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn main() {
     let matches = App::new("Stock Spreadsheet Generator")
-        .version("0.3.0")
+        .version("0.3.1")
         .author("marcus8448")//toml conf
         .about("Creates a simple spreadsheet based on yahoo finance data")//change from prev day
         .arg(Arg::with_name("config")
@@ -44,7 +46,6 @@ fn main() {
     let file = matches.value_of("config").unwrap();
     let wait_time_u64 = matches.value_of("wait-time").unwrap().parse::<u64>().unwrap();
     let wait_time = std::time::Duration::from_secs(wait_time_u64);
-    let one_sec = std::time::Duration::from_secs(1);
 
     let path = std::path::Path::new(file);
     if !path.exists() {
@@ -54,16 +55,7 @@ fn main() {
             Ok(conf) => conf,
             Err(error) => panic!("Failed to create default config! {:}", error),
         };
-        conf.write_all(
-r#"[[tickers]]
-id = "GOOG"
-volume = 2
-
-[[tickers]]
-id = "MSFT"
-volume = 5
-"#
-    .as_ref()).expect("Failed to write default config!");
+        conf.write_all("[[tickers]]\nid = \"GOOG\"\nvolume = 2\n\n[[tickers]]\nid = \"MSFT\"\nvolume = 5\n".as_bytes()).expect("Failed to write default config!");
     }
     let mut conf = String::new();
     let result = std::fs::File::open(file);
@@ -106,7 +98,7 @@ volume = 5
         let completion = std::time::Instant::now();
         let bar = indicatif::ProgressBar::new(wait_time_u64);
         while std::time::Instant::now().duration_since(completion) < wait_time {
-            std::thread::sleep(one_sec);
+            std::thread::sleep(ONE_SEC);
             bar.inc(1);
         }
         bar.finish_and_clear();
@@ -119,30 +111,55 @@ volume = 5
 }
 
 fn deserialize_yahoo(provider: &YahooConnector, t: &Ticker) -> Row {
-    let future = provider.get_latest_quotes(t.id.as_str(), "1m");
-    let result = block_on(future);
-    let data = match result {
+    let data = match block_on(provider.get_latest_quotes(t.id.as_str(), "1m")) {
         Ok(data) => data,
-        Err(error) => panic!("Problem communicating with Yahoo! API: {:?}", error)
+        Err(error0) => {
+            std::thread::sleep(ONE_SEC);
+            let result: YResponse = match block_on(provider.get_latest_quotes(t.id.as_str(), "5m")) {
+                Ok(data) => data,
+                Err(error1) => {
+                    std::thread::sleep(ONE_SEC);
+                    let res: YResponse = match block_on(provider.get_latest_quotes(t.id.as_str(), "30m")) {
+                        Ok(data) => data,
+                        Err(error2) => {
+                            println!("Warning: Failed to obtain quotes: {:?}", error0);
+                            println!("Suppressed: {:?}, {:?}", error1, error2);
+                            return create_failed_row(t);
+                        }
+                    };
+
+                    res
+                }
+            };
+            result
+        }
     };
     let quote = match data.last_quote() {
         Ok(quote) => quote,
-        Err(error) => panic!("Problem deserializing last quote: {:?}", error)
+        Err(error) => {
+            println!("Problem deserializing latest quote: {:?}", error);
+            return create_failed_row(t);
+        }
     };
 
-    let yesterday_close_time = Utc.from_utc_datetime(&chrono::Utc::now().naive_utc().sub(Duration::days(1)).with_hour(12 + 10).unwrap().with_minute(1).unwrap().with_second(1).unwrap());
-    let future = provider.get_quote_history(t.id.as_str(), yesterday_close_time, yesterday_close_time/* + Duration::minutes(30)*/);
-    let result = block_on(future);
-    let data = match result {
-        Ok(data) => data,
-        Err(error) => panic!("Problem communicating with Yahoo! API: {:?}", error)
-    };
-    let quotes = match data.quotes() {
+    let quotes = match get_yesterday_close(provider, t) {
         Ok(quotes) => quotes,
-        Err(error) => panic!("Problem deserializing previous quotes: {:?}", error)
+        Err(error) => {
+            println!("Warning: Failed to obtain previous quote: {:?}", error);
+            return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new(format!("{:.2}", quote.close).as_str()), Cell::new("<Failed>"), Cell::new(t.volume.unwrap_or(0).to_string().as_str()), Cell::new(&*format!("{:.2}", ((t.volume.unwrap_or(0) as f64) * quote.close)))));
+        }
     };
 
     return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new(format!("{:.2}", quote.close).as_str()), Cell::new(format!("{:.2}", quote.close - quotes.get(0).unwrap().close).as_str()), Cell::new(t.volume.unwrap_or(0).to_string().as_str()), Cell::new(&*format!("{:.2}", ((t.volume.unwrap_or(0) as f64) * quote.close)))));
+}
+
+fn get_yesterday_close(provider: &YahooConnector, t: &Ticker) -> Result<Vec<Quote>, YahooError> {
+    let yesterday_close_time = Utc.from_utc_datetime(&chrono::Utc::now().naive_utc().sub(Duration::days(1)).with_hour(12 + 10).unwrap().with_minute(1).unwrap().with_second(1).unwrap());
+    return block_on(provider.get_quote_history(t.id.as_str(), yesterday_close_time, yesterday_close_time + Duration::minutes(5)))?.quotes();
+}
+
+fn create_failed_row(t: &Ticker) -> Row {
+    return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new("<Failed>"), Cell::new("<Failed>"), Cell::new("<Failed>"), Cell::new("<Failed>")));
 }
 
 #[derive(Deserialize)]
