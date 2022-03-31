@@ -1,14 +1,7 @@
-extern crate chrono;
-extern crate clap;
-extern crate prettytable;
-extern crate yahoo_finance_api;
-extern crate serde;
-extern crate toml;
-
 use std::io::{Read, Write};
 use std::ops::Sub;
 use chrono::{Duration, Timelike, TimeZone, Utc};
-use clap::{App, Arg};
+use clap::{Arg, Command};
 use futures::executor::block_on;
 use prettytable::{Cell, Row};
 use yahoo_finance_api::{Quote, YahooConnector, YahooError, YResponse};
@@ -17,24 +10,24 @@ use serde::{Deserialize};
 static ONE_SEC: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn main() {
-    let matches = App::new("Stock Spreadsheet Generator")
-        .version("0.3.1")
+    let matches = Command::new("Stock Spreadsheet Generator")
+        .version("0.3.2")
         .author("marcus8448")//toml conf
         .about("Creates a simple spreadsheet based on yahoo finance data")//change from prev day
-        .arg(Arg::with_name("config")
-            .short("c")
+        .arg(Arg::new("config")
+            .short('c')
             .long("config")
             .takes_value(true)
             .help("the config file to read")
             .default_value("config.toml")
         )
-        .arg(Arg::with_name("run-once")
-            .short("o")
+        .arg(Arg::new("run-once")
+            .short('o')
             .long("run-once")
             .help("whether to query values once or overwrite old values every <wait-time> seconds (default 60)")
         )
-        .arg(Arg::with_name("wait-time")
-            .short("t")
+        .arg(Arg::new("wait-time")
+            .short('t')
             .long("wait-time")
             .takes_value(true)
             .default_value("60")
@@ -43,14 +36,14 @@ fn main() {
         .get_matches();
 
     let provider = YahooConnector::new();
-    let file = matches.value_of("config").unwrap();
+    let filename = matches.value_of("config").unwrap();
     let wait_time_u64 = matches.value_of("wait-time").unwrap().parse::<u64>().unwrap();
     let wait_time = std::time::Duration::from_secs(wait_time_u64);
 
-    let path = std::path::Path::new(file);
+    let path = std::path::Path::new(filename);
     if !path.exists() {
         println!("No config file found... creating one.");
-        let result = std::fs::File::create(file);
+        let result = std::fs::File::create(filename);
         let mut conf = match result {
             Ok(conf) => conf,
             Err(error) => panic!("Failed to create default config! {:}", error),
@@ -58,7 +51,7 @@ fn main() {
         conf.write_all("[[tickers]]\nid = \"GOOG\"\nvolume = 2\n\n[[tickers]]\nid = \"MSFT\"\nvolume = 5\n".as_bytes()).expect("Failed to write default config!");
     }
     let mut conf = String::new();
-    let result = std::fs::File::open(file);
+    let result = std::fs::File::open(filename);
     let mut file = match result {
         Ok(file) => file,
         Err(error) => panic!("Failed to open config! {:}", error),
@@ -85,7 +78,12 @@ fn main() {
         }
 
         table.printstd();
-        match std::fs::File::create("output.csv") {
+        let output: String = if filename == "config.toml" {
+            "output.csv".to_string()
+        } else {
+            format!("{}{}", filename.replace(".toml", ""), ".csv")
+        };
+        match std::fs::File::create(output) {
             Ok(writer) => {
                 match table.to_csv(writer) {
                     Ok(_) => {}
