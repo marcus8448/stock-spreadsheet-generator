@@ -1,62 +1,59 @@
-use std::io::{Read, Write};
-use std::ops::Sub;
-use chrono::{Duration, Timelike, TimeZone, Utc};
-use clap::{Arg, Command};
+use std::fs::File;
+use std::ffi::OsString;
+use std::io::Read;
+use std::io::stdin;
+use std::io::Write;
+use std::process::exit;
+use std::thread::sleep;
+use std::thread::spawn;
+use std::time::Duration;
+use chrono::Local;
+use clap::Arg;
+use clap::Command;
 use futures::executor::block_on;
-use prettytable::{Cell, Row};
-use yahoo_finance_api::{Quote, YahooConnector, YahooError, YResponse};
-use serde::{Deserialize};
+use yahoo_finance_api::Quote;
+use yahoo_finance_api::YahooConnector;
+use yahoo_finance_api::YahooError;
+use serde::Deserialize;
+use serde::Serialize;
 
-static ONE_SEC: std::time::Duration = std::time::Duration::from_secs(1);
+static DEFAULT_CONFIG: &[u8] = "[[tickers]]\nid = \"GOOG\"\nvolume = 2\n\n[[tickers]]\nid = \"MSFT\"\nvolume = 5\n".as_bytes();
+static DEFAULT_CONFIG_NAME: &str = "config.toml";
 
 fn main() {
     let matches = Command::new("Stock Spreadsheet Generator")
-        .version("0.3.2")
-        .author("marcus8448")//toml conf
-        .about("Creates a simple spreadsheet based on yahoo finance data")//change from prev day
+        .version("0.4.0")
+        .author("marcus8448")
+        .about("Creates a simple spreadsheet based on yahoo finance data")
         .arg(Arg::new("config")
             .short('c')
             .long("config")
             .takes_value(true)
             .help("the config file to read")
-            .default_value("config.toml")
-        )
-        .arg(Arg::new("run-once")
-            .short('o')
-            .long("run-once")
-            .help("whether to query values once or overwrite old values every <wait-time> seconds (default 60)")
-        )
-        .arg(Arg::new("wait-time")
-            .short('t')
-            .long("wait-time")
-            .takes_value(true)
-            .default_value("60")
-            .help("how long to wait before doing another query")
+            .default_value(DEFAULT_CONFIG_NAME)
         )
         .get_matches();
 
     let provider = YahooConnector::new();
     let filename = matches.value_of("config").unwrap();
-    let wait_time_u64 = matches.value_of("wait-time").unwrap().parse::<u64>().unwrap();
-    let wait_time = std::time::Duration::from_secs(wait_time_u64);
 
     let path = std::path::Path::new(filename);
     if !path.exists() {
         println!("No config file found... creating one.");
-        let result = std::fs::File::create(filename);
+        let result = File::create(filename);
         let mut conf = match result {
             Ok(conf) => conf,
             Err(error) => panic!("Failed to create default config! {:}", error),
         };
-        conf.write_all("[[tickers]]\nid = \"GOOG\"\nvolume = 2\n\n[[tickers]]\nid = \"MSFT\"\nvolume = 5\n".as_bytes()).expect("Failed to write default config!");
+        conf.write_all(DEFAULT_CONFIG).expect("Failed to write default config!");
     }
     let mut conf = String::new();
-    let result = std::fs::File::open(filename);
-    let mut file = match result {
+    let result = File::open(filename);
+    let mut config_file = match result {
         Ok(file) => file,
         Err(error) => panic!("Failed to open config! {:}", error),
     };
-    match file.read_to_string(&mut conf) {
+    match config_file.read_to_string(&mut conf) {
         Ok(_) => {},
         Err(error) => panic!("Failed to read config! {:}", error),
     };
@@ -67,97 +64,122 @@ fn main() {
         Err(error) => panic!("Failed to parse config! {:}", error),
     };
 
-    loop {
-        println!("Query time: {}", chrono::prelude::Local::now());
+    println!("Query time: {}", Local::now());
 
-        let mut table = prettytable::Table::new();
-        table.add_row(Row::new(vec!(Cell::new("Ticker"), Cell::new("Value"), Cell::new("Change"), Cell::new("Volume"), Cell::new("Total"))));
+    let output_filename: String = if filename == DEFAULT_CONFIG_NAME {
+        "output.csv".to_string()
+    } else {
+        format!("{}{}", filename.replace(".toml", ""), ".csv")
+    };
 
-        for t in &config.tickers {
-             table.add_row(deserialize_yahoo(&provider, t));
-        }
-
-        table.printstd();
-        let output: String = if filename == "config.toml" {
-            "output.csv".to_string()
-        } else {
-            format!("{}{}", filename.replace(".toml", ""), ".csv")
-        };
-        match std::fs::File::create(output) {
-            Ok(writer) => {
-                match table.to_csv(writer) {
-                    Ok(_) => {}
-                    Err(error) => print!("Warning: Problem writing csv: {:?}", error)
-                }
-            }
-            Err(error) => print!("Warning: Problem writing csv: {:?}", error)
-        };
-
-        let completion = std::time::Instant::now();
-        let bar = indicatif::ProgressBar::new(wait_time_u64);
-        while std::time::Instant::now().duration_since(completion) < wait_time {
-            std::thread::sleep(ONE_SEC);
-            bar.inc(1);
-        }
-        bar.finish_and_clear();
-
-
-        if matches.is_present("run-once") {
-            break;
-        }
-    }
-}
-
-fn deserialize_yahoo(provider: &YahooConnector, t: &Ticker) -> Row {
-    let data = match block_on(provider.get_latest_quotes(t.id.as_str(), "1m")) {
-        Ok(data) => data,
-        Err(error0) => {
-            std::thread::sleep(ONE_SEC);
-            let result: YResponse = match block_on(provider.get_latest_quotes(t.id.as_str(), "5m")) {
-                Ok(data) => data,
-                Err(error1) => {
-                    std::thread::sleep(ONE_SEC);
-                    let res: YResponse = match block_on(provider.get_latest_quotes(t.id.as_str(), "10m")) {
-                        Ok(data) => data,
-                        Err(error2) => {
-                            println!("Warning: Failed to obtain quotes: {:?}", error0);
-                            println!("Suppressed: {:?}, {:?}", error1, error2);
-                            return create_failed_row(t);
-                        }
-                    };
-
-                    res
-                }
-            };
-            result
+    let mut writer = match csv::Writer::from_path(&output_filename) {
+        Ok(writer) => writer,
+        Err(error) => {
+            print!("Error: Problem writing csv - {:?}", error);
+            wait_for_input();
+            return;
         }
     };
-    let quote = match data.last_quote() {
-        Ok(quote) => quote,
+
+    for quote in block_on(query_tickers(&config.tickers, &provider)) {
+        match writer.serialize(quote) {
+            Ok(_) => {}
+            Err(error) => println!("Warning: Problem writing csv record: - {:?}", error),
+        };
+    }
+
+    match writer.flush() {
+        Ok(_) => {}
         Err(error) => {
-            println!("Problem deserializing latest quote: {:?}", error);
+            print!("Error: Problem flushing csv - {:?}", error);
+            wait_for_input();
+            return;
+        }
+    };
+
+    spawn(|| match open::that(OsString::from(output_filename)) {
+        Ok(_) => {}
+        Err(_) => {
+            println!("Warning: Failed to open output file!");
+            wait_for_input();
+        }
+    });
+    sleep(Duration::from_millis(1000));
+    exit(0);
+}
+
+async fn query_tickers(tickers: &Vec<Ticker>, provider: &YahooConnector) -> Vec<ComparingQuote> {
+    let mut rows = Vec::new();
+    for t in tickers {
+        rows.push(deserialize_yahoo(provider, t).await);
+    }
+    rows
+}
+
+async fn deserialize_yahoo(provider: &YahooConnector, t: &Ticker) -> ComparingQuote {
+    let volume = t.volume.unwrap_or(0);
+    let close = match provider.get_latest_quotes(t.id.as_str(), "1m").await {
+        Ok(quotes) => match quotes.last_quote() {
+            Ok(quote) => quote.close,
+            Err(error) => {
+                println!("Problem deserializing latest quote: {:?}", error);
+                return create_failed_row(t);
+            }
+        },
+        Err(error0) => {
+            println!("Warning: Failed to obtain quotes: {:?}", error0);
             return create_failed_row(t);
         }
     };
 
-    let quotes = match get_yesterday_close(provider, t) {
-        Ok(quotes) => quotes,
+    let prev_close = match get_yesterday_close(provider, t).await {
+        Ok(quotes) => quotes.get(0).unwrap().close,
         Err(error) => {
             println!("Warning: Failed to obtain previous quote: {:?}", error);
-            return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new(format!("{:.2}", quote.close).as_str()), Cell::new("<Failed>"), Cell::new(t.volume.unwrap_or(0).to_string().as_str()), Cell::new(&*format!("{:.2}", ((t.volume.unwrap_or(0) as f64) * quote.close)))));
+            return ComparingQuote {
+                id: t.id.to_string(),
+                close: Some(format!("{:.2}", close)),
+                change: None,
+                volume: t.volume,
+                total: Some(format!("{:.2}", ((volume as f64) * close)))
+            };
         }
     };
 
-    return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new(format!("{:.2}", quote.close).as_str()), Cell::new(format!("{:.2}", quote.close - quotes.get(0).unwrap().close).as_str()), Cell::new(t.volume.unwrap_or(0).to_string().as_str()), Cell::new(&*format!("{:.2}", ((t.volume.unwrap_or(0) as f64) * quote.close)))));
+    return ComparingQuote {
+        id: t.id.to_string(),
+        close: Some(format!("{:.2}", close)),
+        change: Some(format!("{:.2}", close - prev_close)),
+        volume: t.volume,
+        total: Some(format!("{:.2}", ((volume as f64) * close)))
+    };
 }
 
-fn get_yesterday_close(provider: &YahooConnector, t: &Ticker) -> Result<Vec<Quote>, YahooError> {
-    let yesterday_close_time = Utc.from_utc_datetime(&chrono::Utc::now().naive_utc().sub(Duration::days(1)).with_hour(12 + 10).unwrap().with_minute(1).unwrap().with_second(1).unwrap());
-    return block_on(provider.get_quote_history(t.id.as_str(), yesterday_close_time, yesterday_close_time + Duration::minutes(5)))?.quotes();
+async fn get_yesterday_close(provider: &YahooConnector, t: &Ticker) -> Result<Vec<Quote>, YahooError> {
+    return match provider.get_quote_range(t.id.as_str(), "1d", "2d").await {
+        Ok(data) => {
+            data.quotes()
+        },
+        Err(err) => Err(err)
+    };
 }
 
-fn create_failed_row(t: &Ticker) -> Row {
-    return Row::new(vec!(Cell::new(t.id.as_str()), Cell::new("<Failed>"), Cell::new("<Failed>"), Cell::new("<Failed>"), Cell::new("<Failed>")));
+fn create_failed_row(t: &Ticker) -> ComparingQuote {
+    ComparingQuote {
+        id: t.id.to_string(),
+        close: None,
+        change: None,
+        volume: t.volume,
+        total: None
+    }
+}
+
+fn wait_for_input() {
+    println!("please press enter to close the window...");
+    match stdin().read_exact(&mut [0]) {
+        Ok(_) => {}
+        Err(error) => println!("Warning: Problem reading from stdin: {:?}", error),
+    }
 }
 
 #[derive(Deserialize)]
@@ -169,4 +191,16 @@ struct Config {
 struct Ticker {
     id: String,
     volume: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ComparingQuote {
+    #[serde(rename(serialize = "Ticker"))]
+    id: String,
+    #[serde(rename(serialize = "Value"))]
+    close: Option<String>,
+    change: Option<String>,
+    volume: Option<u32>,
+    total: Option<String>,
 }
