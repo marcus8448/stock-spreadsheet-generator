@@ -20,7 +20,7 @@ static DEFAULT_CONFIG_NAME: &str = "config.toml";
 
 fn main() {
     let matches = Command::new("Stock Spreadsheet Generator")
-        .version("0.5.0")
+        .version("0.5.1")
         .author("marcus8448")
         .about("Creates a simple spreadsheet based on yahoo finance data")
         .arg(Arg::new("config")
