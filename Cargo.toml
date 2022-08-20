@@ -1,7 +1,7 @@
 [package]
 name = "stock_spreadsheet_generator"
 description = "Creates a simple spreadsheet based on yahoo finance data"
-version = "0.5.1"
+version = "0.6.0"
 authors = ["marcus8448"]
 edition = "2021"
 readme = "README.md"
@@ -14,11 +14,12 @@ chrono = "0.4"
 clap = "3.1"
 csv = "1.1"
 futures = "0.3"
-open = "2.1"
+open = "3.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 toml = "0.5"
 reqwest = { version = "0.11", features = ["json"] }
+rust_decimal = "1.26"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = { version = "0.1" }

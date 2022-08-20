@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::io::stdin;
 use std::io::Write;
+use std::ops::{AddAssign, Mul, Sub};
 use std::process::exit;
 use std::thread::sleep;
 use std::thread::spawn;
@@ -12,6 +13,8 @@ use chrono::Local;
 use clap::Arg;
 use clap::Command;
 use futures::executor::block_on;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, Zero};
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -68,23 +71,38 @@ fn main() {
     let mut writer = match csv::Writer::from_path(&output_filename) {
         Ok(writer) => writer,
         Err(error) => {
-            print!("Error: Problem writing csv - {:?}", error);
+            println!("Error: Problem writing csv - {:?}", error);
             wait_for_input();
             return;
         }
     };
 
+    let mut valid = true;
+    let mut total = Decimal::zero();
     for quote in block_on(query_tickers(&config.tickers)) {
-        match writer.serialize(quote) {
+        if valid && quote.total.is_some() {
+            let res = Decimal::from_str_exact((&quote.total).as_deref().unwrap());
+            if res.is_err() {
+                valid = false;
+            }
+            total.add_assign(res.unwrap());
+        }
+        match writer.serialize(&quote) {
             Ok(_) => {}
             Err(error) => println!("Warning: Problem writing csv record: - {:?}", error),
         };
     }
 
+    if valid {
+        writer.write_record(&["", "", "", "", "", ""]).expect("Failed to write newline in csv!?"); //newline
+        writer.write_record(&["", "", "", "", &total.to_string(), ""]).expect("Failed to write total");
+    }
+
+
     match writer.flush() {
         Ok(_) => {}
         Err(error) => {
-            print!("Error: Problem flushing csv - {:?}", error);
+            println!("Error: Problem flushing csv - {:?}", error);
             wait_for_input();
             return;
         }
@@ -111,8 +129,8 @@ async fn query_tickers(tickers: &Vec<Ticker>) -> Vec<FormattedQuote> {
 
 async fn deserialize_yahoo(t: &Ticker) -> FormattedQuote {
     struct Values {
-        close: f64,
-        prev_close: f64,
+        close: Decimal,
+        prev_close: Decimal,
         currency: String,
     }
 
@@ -137,8 +155,8 @@ async fn deserialize_yahoo(t: &Ticker) -> FormattedQuote {
                         return create_failed_row(t);
                     }
                     Some(quote) => Values {
-                        close: quote.meta.regular_market_price,
-                        prev_close: quote.meta.previous_close.unwrap_or(quote.meta.chart_previous_close),
+                        close: Decimal::from_f64(quote.meta.regular_market_price).unwrap(),
+                        prev_close: Decimal::from_f64(quote.meta.previous_close.unwrap_or(quote.meta.chart_previous_close)).unwrap(),
                         currency: quote.meta.currency.clone()
                     }
                 }
@@ -154,23 +172,23 @@ async fn deserialize_yahoo(t: &Ticker) -> FormattedQuote {
         }
     };
 
-    return FormattedQuote {
-        id: t.id.to_string(),
-        close: Some(format!("{:.2}", quote.close)),
-        change: Some(format!("{:.2}", quote.close - quote.prev_close)),
-        amount: t.volume,
-        total: Some(format!("{:.2}", ((volume as f64) * quote.close))),
-        currency: quote.currency
-    };
+    FormattedQuote {
+        ticker: t.id.to_string(),
+        price: Some(quote.close.round_dp(2).to_string()),
+        change: Some(quote.close.sub(quote.prev_close).round_dp(2).to_string()),
+        quantity: t.volume,
+        total: Some(quote.close.mul(Decimal::from(volume)).round_dp(2).to_string()),
+        currency: Some(quote.currency)
+    }
 }
 fn create_failed_row(t: &Ticker) -> FormattedQuote {
     FormattedQuote {
-        id: t.id.to_string(),
-        close: None,
+        ticker: t.id.to_string(),
+        price: None,
         change: None,
-        amount: t.volume,
+        quantity: t.volume,
         total: None,
-        currency: "".to_string()
+        currency: None
     }
 }
 
@@ -220,12 +238,10 @@ struct Meta {
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct FormattedQuote {
-    #[serde(rename(serialize = "Ticker"))]
-    id: String,
-    #[serde(rename(serialize = "Value"))]
-    close: Option<String>,
+    ticker: String,
+    price: Option<String>,
     change: Option<String>,
-    amount: Option<u32>,
+    quantity: Option<u32>,
     total: Option<String>,
-    currency: String
+    currency: Option<String>
 }
