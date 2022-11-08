@@ -1,13 +1,9 @@
-use async_compat::CompatExt;
-use chrono::Local;
 use clap::Arg;
 use clap::Command;
 use csv::ByteRecord;
-use futures::executor::block_on;
 use rust_decimal::prelude::Zero;
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use serde::Serialize;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::stdin;
@@ -29,7 +25,8 @@ volume = 0
 
 static DEFAULT_CONFIG_NAME: &str = "config.toml";
 
-fn main() -> Result<(), u8> {
+#[tokio::main]
+async fn main() -> Result<(), u8> {
     let matches = Command::new("Stock Spreadsheet Generator")
         .version(env!("CARGO_PKG_VERSION"))
         .author("marcus8448")
@@ -64,17 +61,16 @@ fn main() -> Result<(), u8> {
     let config: Config =
         toml::from_slice(config.as_bytes()).expect("Failed to parse configuration file!");
 
-    println!("Query time: {}", Local::now());
-
     let output_filename = format!("{}{}", filename.replace(".toml", ""), ".csv");
     let mut writer = csv::Writer::from_path(&output_filename).expect("Failed to open output file!");
 
     let mut total = Decimal::zero();
-    for quote in block_on(query_tickers(&config.tickers)) {
-        if let Some(tot) = quote.total {
+    writer.write_byte_record(&ByteRecord::from(&["Ticker", "Price", "Change", "Quantity", "Total", "Currency"][..])).expect("");
+    for quote in query_tickers(&config.tickers).await {
+        if let Some(tot) = quote.get_total() {
             total.add_assign(tot);
         }
-        if let Err(error) = writer.serialize(&quote) {
+        if let Err(error) = quote.write_line(&mut writer) {
             println!("Problem writing csv record: {:?}", error);
         }
     }
@@ -100,22 +96,22 @@ fn main() -> Result<(), u8> {
     Ok(())
 }
 
-async fn query_tickers(tickers: &Vec<Ticker>) -> Vec<FormattedQuote> {
-    let mut rows = Vec::new();
+async fn query_tickers(tickers: &Vec<Ticker>) -> Vec<Box<dyn FormattedQuote>> {
+    let mut rows: Vec<Box<dyn FormattedQuote>> = Vec::new();
     for t in tickers {
         rows.push(match deserialize_yahoo(t).await {
             //todo: check rate limits?
-            Ok(quote) => quote,
+            Ok(quote) => Box::new(quote),
             Err(error) => {
                 println!("{}", error);
-                create_failed_row(t)
+                Box::new(create_failed_row(t))
             }
         });
     }
     rows
 }
 
-async fn deserialize_yahoo(t: &Ticker) -> Result<FormattedQuote, String> {
+async fn deserialize_yahoo(t: &Ticker) -> Result<RealQuote, String> {
     struct Values {
         close: Decimal,
         prev_close: Decimal,
@@ -125,7 +121,7 @@ async fn deserialize_yahoo(t: &Ticker) -> Result<FormattedQuote, String> {
     let volume = t.quantity.unwrap_or(0);
     let res = reqwest::get(format!(
         "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?symbol={symbol}&interval=1m&range=1m&events=div|split", symbol = t.id)
-    ).compat().await;
+    ).await;
 
     let Ok(response) = res else {
         return Err(format!("Warning: invalid response from yahoo! {}", res.err().unwrap()));
@@ -144,31 +140,26 @@ async fn deserialize_yahoo(t: &Ticker) -> Result<FormattedQuote, String> {
         return Err("Warning: missing result!".to_string());
     };
 
-    Ok(FormattedQuote {
+    Ok(RealQuote {
         ticker: t.id.to_string(),
-        price: Some(quote.meta.regular_market_price),
-        change: Some(
+        price: quote.meta.regular_market_price,
+        change:
             quote.meta.regular_market_price.sub(
                 quote
                     .meta
                     .previous_close
                     .unwrap_or(quote.meta.chart_previous_close),
             ),
-        ),
-        quantity: t.quantity,
-        total: Some(quote.meta.regular_market_price.mul(Decimal::from(volume))),
-        currency: Some(quote.meta.currency.clone()),
+        quantity: t.quantity.unwrap_or(0),
+        total: quote.meta.regular_market_price.mul(Decimal::from(volume)),
+        currency: quote.meta.currency.clone()
     })
 }
 
-fn create_failed_row(t: &Ticker) -> FormattedQuote {
-    FormattedQuote {
+fn create_failed_row(t: &Ticker) -> FailedQuote {
+    FailedQuote {
         ticker: t.id.to_string(),
-        price: None,
-        change: None,
-        quantity: t.quantity,
-        total: None,
-        currency: None,
+        quantity: t.quantity.unwrap_or(0),
     }
 }
 
@@ -213,13 +204,94 @@ struct Meta {
     regular_market_price: Decimal,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "PascalCase")]
-struct FormattedQuote {
+trait FormattedQuote {
+    fn get_ticker(&self) -> &String;
+    fn get_price(&self) -> Option<&Decimal>;
+    fn get_change(&self) -> Option<&Decimal>;
+    fn get_quantity(&self) -> u32;
+    fn get_total(&self) -> Option<&Decimal>;
+    fn get_currency(&self) -> Option<&String>;
+
+    fn write_line(&self, writer: &mut csv::Writer<File>) -> Result<(), csv::Error>;
+}
+
+
+struct RealQuote {
     ticker: String,
-    price: Option<Decimal>,
-    change: Option<Decimal>,
-    quantity: Option<u32>,
-    total: Option<Decimal>,
-    currency: Option<String>,
+    price: Decimal,
+    change: Decimal,
+    quantity: u32,
+    total: Decimal,
+    currency: String
+}
+
+impl FormattedQuote for RealQuote {
+    fn get_ticker(&self) -> &String {
+        &self.ticker
+    }
+
+    fn get_price(&self) -> Option<&Decimal> {
+        Some(&self.price)
+    }
+
+    fn get_change(&self) -> Option<&Decimal> {
+        Some(&self.change)
+    }
+
+    fn get_quantity(&self) -> u32 {
+        self.quantity
+    }
+
+    fn get_total(&self) -> Option<&Decimal> {
+        Some(&self.total)
+    }
+
+    fn get_currency(&self) -> Option<&String> {
+        Some(&self.currency)
+    }
+
+    fn write_line(&self, writer: &mut csv::Writer<File>) -> Result<(), csv::Error> {
+        writer.write_field(&self.ticker)?;
+        writer.write_field(&self.price.round_dp(2).to_string())?;
+        writer.write_field(&self.change.round_dp(2).to_string())?;
+        writer.write_field(&self.quantity.to_string())?;
+        writer.write_field(&self.total.round_dp(2).to_string())?;
+        writer.write_field(&self.currency)?;
+        writer.write_record(None::<&[u8]>)
+    }
+}
+
+struct FailedQuote {
+    ticker: String,
+    quantity: u32
+}
+
+impl FormattedQuote for FailedQuote {
+    fn get_ticker(&self) -> &String {
+        &self.ticker
+    }
+
+    fn get_price(&self) -> Option<&Decimal> {
+        None
+    }
+
+    fn get_change(&self) -> Option<&Decimal> {
+        None
+    }
+
+    fn get_quantity(&self) -> u32 {
+        self.quantity
+    }
+
+    fn get_total(&self) -> Option<&Decimal> {
+        None
+    }
+
+    fn get_currency(&self) -> Option<&String> {
+        None
+    }
+
+    fn write_line(&self, writer: &mut csv::Writer<File>) -> Result<(), csv::Error> {
+        writer.write_byte_record(&ByteRecord::from(&[&self.ticker, "", "", self.quantity.to_string().as_str(), "", ""][..]))
+    }
 }
