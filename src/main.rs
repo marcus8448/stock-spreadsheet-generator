@@ -118,7 +118,7 @@ fn write_csv(
                 writer.write_field(quote.change.round_dp(2).to_string())?;
                 writer.write_field(quantity.to_string())?;
                 writer.write_field(
-                    (quote.change * Decimal::from(quantity))
+                    (quote.price * Decimal::from(quantity))
                         .round_dp(2)
                         .to_string(),
                 )?;
@@ -154,8 +154,8 @@ fn write_csv(
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
-    #[error("failed to write csv data")]
+    #[error("failed to write csv data: {0}")]
     CsvError(#[from] csv::Error),
-    #[error("failed to open file with default program")]
+    #[error("failed to open file with default program: {0}")]
     OpeningError(#[from] std::io::Error),
 }
