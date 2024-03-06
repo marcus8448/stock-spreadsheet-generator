@@ -1,3 +1,3 @@
 # Stock Spreadsheet Generator
 
-Creates a simple spreadsheet based on yahoo finance data
+Creates a spreadsheet based on yahoo finance data
