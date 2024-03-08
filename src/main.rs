@@ -125,7 +125,7 @@ fn write_csv(
                 writer.write_field(&quote.currency)?;
                 writer.write_record(None::<&[u8]>)?;
 
-                total += quote.price;
+                total += quote.price * Decimal::from(quantity);
             }
             None => {
                 writer.write_record(&[
@@ -145,7 +145,7 @@ fn write_csv(
         .expect("Failed to write newline in csv!");
 
     writer
-        .write_record(["", "", "", "", &total.to_string(), ""])
+        .write_record(["", "", "", "", &total.round_dp(2).to_string(), ""])
         .expect("Failed to write total!");
 
     writer.flush()?;
